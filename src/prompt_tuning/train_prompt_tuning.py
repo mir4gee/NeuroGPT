@@ -56,11 +56,22 @@ def get_args():
              '(default: True). Leave the original --freeze-* flags at '
              'their defaults (False) when using this flag.'
     )
+    parser.add_argument(
+        '--readout',
+        metavar='STR', default='gpt', choices=('gpt', 'skip'), type=str,
+        help="classifier input: 'gpt' reads only the frozen GPT's last-token "
+             "state (original spec, default); 'skip' also adds a trainable "
+             "linear projection of the frozen encoder features (see "
+             "src/prompt_tuning/soft_prompt.py)"
+    )
     return parser
 
 
 def make_prompt_tuned_model(config: Dict):
     base_model = train_gpt.make_model(dict(config))
+    # encoder output size per chunk, same formula as train_gpt.make_model
+    enc_dim = ((config['chunk_len'] - config['filter_time_length'] + 1 - config['pool_time_length'])
+               // config['stride_avg_pool'] + 1) * config['n_filters_time']
 
     model = PromptTunedModel(
         encoder=base_model.encoder,
@@ -69,6 +80,8 @@ def make_prompt_tuned_model(config: Dict):
         unembedder=base_model.unembedder,
         num_conditions=config['num_decoding_classes'],
         num_tokens_per_condition=config['num_prompt_tokens_per_condition'],
+        readout=config['readout'],
+        enc_dim=enc_dim,
     )
     # base_model already ran switch_decoding_mode() inside make_model()
     # (same shared decoder/embedder objects), so just copy the top-level

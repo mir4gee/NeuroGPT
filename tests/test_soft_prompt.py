@@ -110,7 +110,51 @@ def test_freezing_leaves_only_prompt_and_head_trainable():
     assert any(n.startswith('embedder.') and not p.requires_grad for n, p in model.named_parameters())
 
 
+class _DummyEncoder(torch.nn.Module):
+    """Maps (B, chunks, 2, 16) -> (B*chunks, 2, 16), like the real encoder's output layout."""
+    def __init__(self):
+        super().__init__()
+        self.lin = torch.nn.Linear(16, 16)
+
+    def forward(self, x):
+        b, n, c, t = x.shape
+        return self.lin(x.reshape(b * n, c, t))
+
+
+def test_skip_readout_forward_backward_and_freeze():
+    embedder = BaseEmbedder(in_dim=EMBED_DIM, embed_dim=EMBED_DIM, num_hidden_layers=1)
+    decoder = GPTModel(num_hidden_layers=2, num_attention_heads=4, embed_dim=EMBED_DIM, n_positions=64)
+    model = PromptTunedModel(
+        encoder=_DummyEncoder(), embedder=embedder, decoder=decoder, unembedder=None,
+        num_conditions=NUM_CONDITIONS, num_tokens_per_condition=NUM_TOKENS_PER_CONDITION,
+        readout='skip', enc_dim=EMBED_DIM,
+    )
+    model.switch_decoding_mode(is_decoding_mode=True, num_decoding_classes=NUM_CONDITIONS)
+    freeze_for_prompt_tuning(model)
+
+    batch = {
+        'inputs': torch.randn(BATCH_SIZE, NUM_CHUNKS, 2, 16),
+        'attention_mask': torch.ones(BATCH_SIZE, NUM_CHUNKS, dtype=torch.long),
+        'labels': torch.randint(0, NUM_CONDITIONS, (BATCH_SIZE,)),
+    }
+    losses, outputs = model.compute_loss(batch=batch, return_outputs=True)
+    assert outputs['decoding_logits'].shape == (BATCH_SIZE, NUM_CONDITIONS)
+    losses['loss'].backward()
+
+    assert model.skip_proj.weight.requires_grad and model.skip_proj.weight.grad is not None
+    assert model.soft_prompt.prompt_embeds.grad is not None
+    assert all(not p.requires_grad for p in model.encoder.parameters())
+
+    try:
+        PromptTunedModel(encoder=None, embedder=embedder, decoder=decoder, readout='skip', enc_dim=EMBED_DIM)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("readout='skip' without an encoder must raise")
+
+
 if __name__ == '__main__':
+    test_skip_readout_forward_backward_and_freeze()
     test_prompt_prepends_correct_shape()
     test_zero_tokens_is_a_noop()
     test_forward_and_backward_run()

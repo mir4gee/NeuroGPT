@@ -86,6 +86,8 @@ class PromptTunedModel(Model):
         unembedder=None,
         num_conditions: int = 4,
         num_tokens_per_condition: int = 4,
+        readout: str = 'gpt',
+        enc_dim: int = None,
     ) -> None:
         super().__init__(encoder=encoder, embedder=embedder, decoder=decoder, unembedder=unembedder)
         self.soft_prompt = ConditionSoftPrompt(
@@ -93,6 +95,23 @@ class PromptTunedModel(Model):
             num_tokens_per_condition=num_tokens_per_condition,
             embed_dim=decoder.embed_dim,
         )
+        # readout='gpt' (default, the original spec): the classifier reads only
+        # the frozen GPT's last-token state. Diagnostic on BCI-IV-2a fold 0
+        # showed that state is almost constant across samples (mean pairwise
+        # cosine 0.97) and a linear probe on it reaches only 0.36 held-out,
+        # versus 0.49 on the frozen encoder output, so the frozen GPT discards
+        # most class information. readout='skip' adds a trainable linear
+        # projection of the (mean-over-chunks) frozen encoder features to the
+        # GPT last-token state before the pooler, so the head can use the
+        # encoder information while the prompts still steer the frozen GPT.
+        if readout not in ('gpt', 'skip'):
+            raise ValueError(f"readout must be 'gpt' or 'skip', got {readout!r}")
+        self.readout = readout
+        self.skip_proj = None
+        if readout == 'skip':
+            if encoder is None or enc_dim is None:
+                raise ValueError("readout='skip' needs an encoder and enc_dim")
+            self.skip_proj = nn.Linear(enc_dim, decoder.embed_dim)
 
     def forward(
         self,
@@ -109,6 +128,9 @@ class PromptTunedModel(Model):
             b, f1, f2 = features.size()
             nchunks = batch['inputs'].size()[1]
             batch['inputs'] = features.view(b // nchunks, nchunks, f1 * f2)
+            if self.readout == 'skip':
+                chunk_mask = batch['attention_mask'].to(batch['inputs'].dtype).unsqueeze(-1)
+                enc_feats = (batch['inputs'] * chunk_mask).sum(dim=1) / chunk_mask.sum(dim=1).clamp(min=1)
 
         if prep_batch:
             if len(batch['inputs'].size()) > 3:
@@ -137,7 +159,21 @@ class PromptTunedModel(Model):
         # what dtype BaseEmbedder.prep_batch cast it to upstream.
         batch['attention_mask'] = batch['attention_mask'].long()
 
-        outputs = self.decoder(batch=batch)
+        if self.readout == 'skip' and self.is_decoding_mode:
+            hidden = self.decoder.transformer.forward(
+                inputs_embeds=batch['inputs_embeds'],
+                attention_mask=batch['attention_mask'],
+                return_dict=True,
+            )['last_hidden_state']
+            last = hidden[torch.arange(hidden.size(0), device=hidden.device), batch['attention_mask'].sum(dim=1) - 1]
+            pooled = self.decoder.pooler_layer(last + self.skip_proj(enc_feats))
+            outputs = {
+                'outputs': hidden,
+                'pooler_outputs': pooled,
+                'decoding_logits': self.decoder.decoding_head(pooled),
+            }
+        else:
+            outputs = self.decoder(batch=batch)
 
         if self.unembedder is not None and not self.is_decoding_mode:
             outputs['outputs'] = self.unembedder(inputs=outputs['outputs'])['outputs']

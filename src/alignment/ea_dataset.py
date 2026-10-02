@@ -69,7 +69,8 @@ class AlignedMotorImageryDataset(MotorImageryDataset):
     """
 
     def __init__(self, *args, align: str = 'none', margin: int = 0, augment: bool = False,
-                 noise_std: float = 0.0, ch_drop: float = 0.0, amp_scale: float = 0.0, **kwargs):
+                 noise_std: float = 0.0, ch_drop: float = 0.0, amp_scale: float = 0.0,
+                 subset: str = None, subset_frac: float = 0.0, **kwargs):
         if align is None:  # train_gpt.get_config() turns the string 'none' into None
             align = 'none'
         if align not in ('none', 'ea'):
@@ -84,6 +85,19 @@ class AlignedMotorImageryDataset(MotorImageryDataset):
         # picks a random start (random-crop augmentation) when start_samp_pnt == -1. Evaluation data
         # is pinned to the centre crop, i.e. exactly the original t = 2..6 s window.
         self.start_samp_pnt = -1 if (augment and self.margin > 0) else self.margin
+        # Optional fixed split of the trials (used to hold out part of a calibration session for validation).
+        # The permutation uses a fixed seed (0) so every arm and every training seed sees the same split.
+        if subset is not None:
+            if subset not in ('train', 'val') or not 0 < subset_frac < 1:
+                raise ValueError('subset must be train/val with 0 < subset_frac < 1')
+            n = len(self.labels)
+            perm = np.random.default_rng(0).permutation(n)
+            n_val = int(round(subset_frac * n))
+            keep = np.sort(perm[:n_val] if subset == 'val' else perm[n_val:])
+            self.trials, self.labels = self.trials[keep], self.labels[keep]
+
+    def __len__(self):
+        return len(self.labels)
 
     def get_trials_from_single_subj(self, sub_id):
         # Same as the vendored method, except the window is widened by `margin` samples on both sides.

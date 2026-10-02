@@ -51,6 +51,9 @@ def get_args():
     parser.add_argument('--calib-subject', metavar='INT', default=0, type=int,
                         help='1-based subject: train ONLY on its session T (labeled calibration data) and evaluate on '
                              'its session E. Standard competition protocol, NOT the paper\'s cross-subject protocol.')
+    parser.add_argument('--calib-val-frac', metavar='FLOAT', default=0.0, type=float,
+                        help='with --calib-subject: hold out this fraction of session T for validation, train on the '
+                             'rest, and additionally predict session E (written as test_*.npy / test_metrics.json)')
     return parser
 
 
@@ -107,10 +110,18 @@ def train(config: Dict = None):
         align=config['align'],
         margin=config['margin'],
     )
+    vfrac = float(config.get('calib_val_frac') or 0.0)
+    split = config.get('calib_subject') and vfrac > 0
     train_dataset = AlignedMotorImageryDataset(
         train_files, augment=True, noise_std=config['noise_std'], ch_drop=config['ch_drop'],
-        amp_scale=config['amp_scale'], **dataset_kwargs)
-    validation_dataset = AlignedMotorImageryDataset(test_files, augment=False, **dataset_kwargs)
+        amp_scale=config['amp_scale'], subset='train' if split else None, subset_frac=vfrac, **dataset_kwargs)
+    final_test_dataset = None
+    if split:
+        validation_dataset = AlignedMotorImageryDataset(train_files, augment=False, subset='val', subset_frac=vfrac,
+                                                        **dataset_kwargs)
+        final_test_dataset = AlignedMotorImageryDataset(test_files, augment=False, **dataset_kwargs)
+    else:
+        validation_dataset = AlignedMotorImageryDataset(test_files, augment=False, **dataset_kwargs)
 
     def model_init(params: Dict = None):
         model_config = dict(config)
@@ -159,6 +170,12 @@ def train(config: Dict = None):
     pred = trainer.predict(validation_dataset)
     np.save(os.path.join(config['log_dir'], 'heldout_logits.npy'), pred.predictions)
     np.save(os.path.join(config['log_dir'], 'heldout_labels.npy'), pred.label_ids)
+    if final_test_dataset is not None:
+        tp = trainer.predict(final_test_dataset)
+        np.save(os.path.join(config['log_dir'], 'test_logits.npy'), tp.predictions)
+        np.save(os.path.join(config['log_dir'], 'test_labels.npy'), tp.label_ids)
+        with open(os.path.join(config['log_dir'], 'test_metrics.json'), 'w') as f:
+            json.dump({k: float(v) for k, v in tp.metrics.items()}, f, indent=2)
     print('HELDOUT_FINAL', json.dumps({k: float(v) for k, v in metrics.items()}))
     return trainer
 

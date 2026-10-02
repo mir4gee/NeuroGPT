@@ -4,7 +4,8 @@
 #   ARM=calib  : start from the cross-subject (LOSO) model of the same fold and seed (runs5k/none_s<seed>-<fold>)
 #   ARM=within : start from the authors' pre-trained Neuro-GPT only
 # Settings declared before any result: 1,000 steps, lr 5e-5, final-step accuracy.
-# usage: PYTHON=... experiments/run_calibration.sh ARM SEED SUBJECT [SUBJECT ...]   (subjects 1..9)
+# usage: PYTHON=... [ALIGN=ea] experiments/run_calibration.sh ARM SEED SUBJECT [SUBJECT ...]   (subjects 1..9)
+# ALIGN=ea (exploratory): per-session alignment in both stages; calib then starts from runs5k/ea_s<seed>-<fold>.
 set -euo pipefail
 ARM=$1; SEED=$2; shift 2
 PY=${PYTHON:-python3}
@@ -12,13 +13,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DATA=${DATA:-"$HERE/../../neurogpt_data/bci2a_egg_npz/"}
 LOSO=${LOSO:-"$HERE/../../neurogpt_data/runs5k"}
 OUT=${OUT:-"$HERE/../../neurogpt_data/calib"}
+ALIGN=${ALIGN:-none}
 mkdir -p "$OUT"
 cd "$HERE/../scripts"
 for S in "$@"; do
-  F=$((S - 1)); RUN="${ARM}_s${SEED}_subj${S}"
+  F=$((S - 1)); RUN="${ARM}_s${SEED}_subj${S}"; [ "$ALIGN" = ea ] && RUN="${ARM}_ea_s${SEED}_subj${S}"
   if [ -f "$OUT/${RUN}-${F}/heldout_metrics.json" ]; then echo "skip $RUN"; continue; fi
   INIT=""
-  if [ "$ARM" = calib ]; then INIT="--init-from=$LOSO/none_s${SEED}-${F}/model_final/model.safetensors"; fi
+  if [ "$ARM" = calib ]; then INIT="--init-from=$LOSO/${ALIGN}_s${SEED}-${F}/model_final/model.safetensors"; fi
   "$PY" ../src/alignment/train_aligned.py \
     --training-style=decoding --num-decoding-classes=4 \
     --training-steps=1000 --eval_every_n_steps=100 --log-every-n-steps=100 \
@@ -27,6 +29,6 @@ for S in "$@"; do
     --num-encoder-layers=6 --num-hidden-layers=6 --embedding-dim=1024 --learning-rate=5e-5 \
     --pretrained-model=../pretrained_model/pytorch_model.bin \
     --dst-data-path="$DATA" --log-dir="$OUT" --seed="$SEED" --fold_i="$F" \
-    --calib-subject="$S" $INIT --run-name="$RUN" > "$OUT/${RUN}.log" 2>&1
+    --calib-subject="$S" --align="$ALIGN" $INIT --run-name="$RUN" > "$OUT/${RUN}.log" 2>&1
   echo "done $RUN"
 done

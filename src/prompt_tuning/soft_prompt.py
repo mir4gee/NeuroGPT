@@ -119,6 +119,22 @@ class PromptTunedModel(Model):
             # only worked after StandardScaler; this does the same in-model.
             self.readout_norm = nn.BatchNorm1d(decoder.embed_dim, affine=False)
 
+    def train(self, mode: bool = True):
+        """Keep a frozen backbone in eval mode while training.
+
+        Freezing only stops gradient updates; dropout (the EEG encoder uses
+        p=0.5) and BatchNorm batch statistics stay active in train mode, which
+        corrupts the frozen features during training but not at evaluation
+        (diagnostic: a probe on eval-mode features fits, while the head failed
+        to fit train-mode features). Set by freeze_for_prompt_tuning().
+        """
+        super().train(mode)
+        if getattr(self, 'backbone_frozen', False):
+            for module in (self.encoder, self.embedder, self.decoder.transformer, self.unembedder):
+                if module is not None:
+                    module.eval()
+        return self
+
     def forward(
         self,
         batch: Dict[str, torch.Tensor],
@@ -210,5 +226,8 @@ def freeze_for_prompt_tuning(model: "PromptTunedModel") -> None:
     if model.unembedder is not None:
         for param in model.unembedder.parameters():
             param.requires_grad = False
+
+    model.backbone_frozen = True
+    model.train(model.training)
 
     # model.soft_prompt.prompt_embeds keeps requires_grad=True (nn.Parameter default)

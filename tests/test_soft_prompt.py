@@ -132,6 +132,11 @@ def test_skip_readout_forward_backward_and_freeze():
     model.switch_decoding_mode(is_decoding_mode=True, num_decoding_classes=NUM_CONDITIONS)
     freeze_for_prompt_tuning(model)
 
+    model.train()
+    assert not model.encoder.training and not model.embedder.training and not model.decoder.transformer.training, \
+        'frozen backbone must stay in eval mode (no dropout / BN updates) during training'
+    assert model.decoder.pooler_layer.training and model.decoder.decoding_head.training
+
     batch = {
         'inputs': torch.randn(BATCH_SIZE, NUM_CHUNKS, 2, 16),
         'attention_mask': torch.ones(BATCH_SIZE, NUM_CHUNKS, dtype=torch.long),

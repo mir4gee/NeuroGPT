@@ -46,6 +46,11 @@ def get_args():
                              "test subject (for hyper-parameter selection on TRAINING subjects only)")
     parser.add_argument('--exclude-subjects', metavar='STR', default='', type=str,
                         help='comma-separated 1-based subject numbers removed from training (e.g. the outer test subject)')
+    parser.add_argument('--init-from', metavar='PATH', default='', type=str,
+                        help='model.safetensors of an already fine-tuned run to start from (e.g. the LOSO model)')
+    parser.add_argument('--calib-subject', metavar='INT', default=0, type=int,
+                        help='1-based subject: train ONLY on its session T (labeled calibration data) and evaluate on '
+                             'its session E. Standard competition protocol, NOT the paper\'s cross-subject protocol.')
     return parser
 
 
@@ -86,6 +91,12 @@ def train(config: Dict = None):
         banned = set(test_files) | set(_subject_files(all_files, _parse_subjects(config.get('exclude_subjects'))))
         train_files = [f for f in all_files if f not in banned]
 
+    if config.get('calib_subject'):
+        all_files = sorted(os.listdir(downstream_path))[:18]
+        s_ = int(config['calib_subject'])
+        test_files = [all_files[2 * (s_ - 1)]]       # A0sE.npz, a later session
+        train_files = [all_files[2 * (s_ - 1) + 1]]  # A0sT.npz, calibration session
+
     dataset_kwargs = dict(
         sample_keys=['inputs', 'attention_mask'],
         chunk_len=config['chunk_len'],
@@ -105,7 +116,11 @@ def train(config: Dict = None):
         model_config = dict(config)
         if params is not None:
             model_config |= params
-        return train_gpt.make_model(model_config)
+        model = train_gpt.make_model(model_config)
+        if config.get('init_from'):
+            from safetensors.torch import load_file
+            model.load_state_dict(load_file(config['init_from']), strict=True)
+        return model
 
     trainer = train_gpt.make_trainer(
         model_init=model_init,

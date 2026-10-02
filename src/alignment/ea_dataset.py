@@ -20,6 +20,7 @@ import os
 import sys
 
 import numpy as np
+import torch
 
 _SRC_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if _SRC_DIR not in sys.path:
@@ -43,19 +44,71 @@ def euclidean_align(trials: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     return np.einsum('cd,ndt->nct', inv_sqrt, trials)
 
 
+def augment_chunks(x: torch.Tensor, noise_std: float = 0.0, ch_drop: float = 0.0, amp_scale: float = 0.0,
+                   generator=None) -> torch.Tensor:
+    """
+    Light training-time augmentation on a (chunks, channels, time) tensor.
+    noise_std: std of additive Gaussian noise (data are per-channel z-scored, so ~unit scale);
+    ch_drop:   probability of zeroing a whole channel (same channels for every chunk of the trial);
+    amp_scale: multiplies the trial by U(1-amp_scale, 1+amp_scale).
+    """
+    if amp_scale > 0:
+        x = x * (1.0 + amp_scale * (2 * torch.rand(1, generator=generator) - 1))
+    if ch_drop > 0:
+        keep = (torch.rand(x.shape[1], generator=generator) >= ch_drop).to(x.dtype)
+        x = x * keep[None, :, None]
+    if noise_std > 0:
+        x = x + noise_std * torch.randn(x.shape, generator=generator, dtype=x.dtype)
+    return x
+
+
 class AlignedMotorImageryDataset(MotorImageryDataset):
     """
     MotorImageryDataset with optional per-file Euclidean Alignment.
     align='none' reproduces the vendored behaviour exactly.
     """
 
-    def __init__(self, *args, align: str = 'none', **kwargs):
+    def __init__(self, *args, align: str = 'none', margin: int = 0, augment: bool = False,
+                 noise_std: float = 0.0, ch_drop: float = 0.0, amp_scale: float = 0.0, **kwargs):
         if align is None:  # train_gpt.get_config() turns the string 'none' into None
             align = 'none'
         if align not in ('none', 'ea'):
             raise ValueError(f"align must be 'none' or 'ea', got {align!r}")
-        self.align = align  # must exist before the parent constructor calls get_trials_all()
+        # these must exist before the parent constructor calls get_trials_all()
+        self.align = align
+        self.margin = int(margin)
+        self.augment = augment
+        self.noise_std, self.ch_drop, self.amp_scale = noise_std, ch_drop, amp_scale
         super().__init__(*args, **kwargs)
+        # margin > 0 makes each trial longer than the two 2-s chunks, so the vendored split_chunks()
+        # picks a random start (random-crop augmentation) when start_samp_pnt == -1. Evaluation data
+        # is pinned to the centre crop, i.e. exactly the original t = 2..6 s window.
+        self.start_samp_pnt = -1 if (augment and self.margin > 0) else self.margin
+
+    def get_trials_from_single_subj(self, sub_id):
+        # Same as the vendored method, except the window is widened by `margin` samples on both sides.
+        raw = self.data_all[sub_id]['s'].T
+        events_type = self.data_all[sub_id]['etyp'].T
+        events_position = self.data_all[sub_id]['epos'].T
+        events_duration = self.data_all[sub_id]['edur'].T
+        idxs = [i for i, x in enumerate((events_type == 768)[0]) if x]
+        trial_labels = self.get_labels(sub_id)
+        trials, classes = [], []
+        for j, index in enumerate(idxs):
+            try:
+                classes.append(trial_labels[j])
+                start = events_position[0, index]
+                stop = start + events_duration[0, index]
+                trials.append(raw[:22, start + 500 - self.margin: stop - 375 + self.margin])
+            except Exception:
+                continue
+        return trials, classes
+
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        if self.augment and (self.noise_std > 0 or self.ch_drop > 0 or self.amp_scale > 0):
+            item['inputs'] = augment_chunks(item['inputs'], self.noise_std, self.ch_drop, self.amp_scale)
+        return item
 
     def get_trials_all(self):
         trials_all, labels_all, total_num = [], [], []

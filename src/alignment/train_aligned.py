@@ -35,7 +35,29 @@ def get_args():
         help="input alignment: 'none' (vendored behaviour) or 'ea' (per-session "
              "Euclidean Alignment, see src/alignment/ea_dataset.py) (default: none)"
     )
+    parser.add_argument('--margin', metavar='INT', default=0, type=int,
+                        help='extra samples on each side of the t=2..6 s window; training then uses random '
+                             'crops inside it, evaluation uses the centre crop (default: 0 = off)')
+    parser.add_argument('--noise-std', metavar='FLOAT', default=0.0, type=float, help='train-time Gaussian noise std')
+    parser.add_argument('--ch-drop', metavar='FLOAT', default=0.0, type=float, help='train-time channel dropout prob')
+    parser.add_argument('--amp-scale', metavar='FLOAT', default=0.0, type=float, help='train-time amplitude jitter')
+    parser.add_argument('--val-subjects', metavar='STR', default='', type=str,
+                        help="comma-separated 1-based subject numbers to use as validation instead of the fold's "
+                             "test subject (for hyper-parameter selection on TRAINING subjects only)")
+    parser.add_argument('--exclude-subjects', metavar='STR', default='', type=str,
+                        help='comma-separated 1-based subject numbers removed from training (e.g. the outer test subject)')
     return parser
+
+
+def _subject_files(files, subjects):
+    out = []
+    for s in subjects:
+        out += files[2 * (s - 1): 2 * (s - 1) + 2]
+    return out
+
+
+def _parse_subjects(text):
+    return [int(x) for x in str(text or '').split(',') if x.strip()]
 
 
 def train(config: Dict = None):
@@ -57,6 +79,12 @@ def train(config: Dict = None):
     train_folds, test_folds = train_gpt.cv_split_bci(sorted(os.listdir(downstream_path))[:18])
     train_files = train_folds[config['fold_i']]
     test_files = test_folds[config['fold_i']]
+    val_subj = _parse_subjects(config.get('val_subjects'))
+    if val_subj:
+        all_files = sorted(os.listdir(downstream_path))[:18]
+        test_files = _subject_files(all_files, val_subj)
+        banned = set(test_files) | set(_subject_files(all_files, _parse_subjects(config.get('exclude_subjects'))))
+        train_files = [f for f in all_files if f not in banned]
 
     dataset_kwargs = dict(
         sample_keys=['inputs', 'attention_mask'],
@@ -66,9 +94,12 @@ def train(config: Dict = None):
         root_path=downstream_path,
         gpt_only=not config['use_encoder'],
         align=config['align'],
+        margin=config['margin'],
     )
-    train_dataset = AlignedMotorImageryDataset(train_files, **dataset_kwargs)
-    validation_dataset = AlignedMotorImageryDataset(test_files, **dataset_kwargs)
+    train_dataset = AlignedMotorImageryDataset(
+        train_files, augment=True, noise_std=config['noise_std'], ch_drop=config['ch_drop'],
+        amp_scale=config['amp_scale'], **dataset_kwargs)
+    validation_dataset = AlignedMotorImageryDataset(test_files, augment=False, **dataset_kwargs)
 
     def model_init(params: Dict = None):
         model_config = dict(config)
@@ -105,10 +136,14 @@ def train(config: Dict = None):
     )
 
     trainer.train(resume_from_checkpoint=None)
+    trainer.save_model(os.path.join(config['log_dir'], 'model_final'))  # small (encoder-only), enables calibration/ensembling later
 
     metrics = trainer.evaluate(validation_dataset)
     with open(os.path.join(config['log_dir'], 'heldout_metrics.json'), 'w') as f:
         json.dump({k: float(v) for k, v in metrics.items()}, f, indent=2)
+    pred = trainer.predict(validation_dataset)
+    np.save(os.path.join(config['log_dir'], 'heldout_logits.npy'), pred.predictions)
+    np.save(os.path.join(config['log_dir'], 'heldout_labels.npy'), pred.label_ids)
     print('HELDOUT_FINAL', json.dumps({k: float(v) for k, v in metrics.items()}))
     return trainer
 

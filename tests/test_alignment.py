@@ -13,7 +13,8 @@ _SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file_
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-from alignment.ea_dataset import euclidean_align  # noqa: E402
+import torch  # noqa: E402
+from alignment.ea_dataset import augment_chunks, euclidean_align  # noqa: E402
 
 RNG = np.random.default_rng(0)
 
@@ -48,7 +49,18 @@ def test_rank_deficient_input_stays_finite():
     assert np.isfinite(euclidean_align(x)).all()
 
 
+def test_augmentation_shapes_and_identity():
+    x = torch.randn(2, 22, 500)
+    assert torch.equal(augment_chunks(x), x)  # all-off is the identity
+    y = augment_chunks(x, noise_std=0.1, ch_drop=0.5, amp_scale=0.1, generator=torch.Generator().manual_seed(0))
+    assert y.shape == x.shape and not torch.equal(y, x)
+    dropped = (y.abs().sum(dim=(0, 2)) < 1e-3)  # zeroed channels stay ~zero apart from the noise
+    z = augment_chunks(x, ch_drop=1.0)
+    assert torch.count_nonzero(z) == 0 and dropped.shape[0] == 22
+
+
 if __name__ == '__main__':
+    test_augmentation_shapes_and_identity()
     test_mean_covariance_becomes_identity()
     test_different_subject_mixings_become_comparable()
     test_rank_deficient_input_stays_finite()

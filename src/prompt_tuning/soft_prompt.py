@@ -112,6 +112,12 @@ class PromptTunedModel(Model):
             if encoder is None or enc_dim is None:
                 raise ValueError("readout='skip' needs an encoder and enc_dim")
             self.skip_proj = nn.Linear(enc_dim, decoder.embed_dim)
+            # Parameter-free standardisation of the pooler input. The GPT
+            # last-token state has a large constant offset (up to ~6.7) against
+            # a per-feature spread of ~0.12, which saturates the tanh pooler
+            # (train loss stuck at ln 4 for lr >= 1e-3). The diagnostic probe
+            # only worked after StandardScaler; this does the same in-model.
+            self.readout_norm = nn.BatchNorm1d(decoder.embed_dim, affine=False)
 
     def forward(
         self,
@@ -166,7 +172,7 @@ class PromptTunedModel(Model):
                 return_dict=True,
             )['last_hidden_state']
             last = hidden[torch.arange(hidden.size(0), device=hidden.device), batch['attention_mask'].sum(dim=1) - 1]
-            pooled = self.decoder.pooler_layer(last + self.skip_proj(enc_feats))
+            pooled = self.decoder.pooler_layer(self.readout_norm(last + self.skip_proj(enc_feats)))
             outputs = {
                 'outputs': hidden,
                 'pooler_outputs': pooled,

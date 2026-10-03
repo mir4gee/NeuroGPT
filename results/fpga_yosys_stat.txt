@@ -1,0 +1,27 @@
+
+3. Printing statistics.
+
+=== frontend_accel ===
+
+   Number of wires:               2178
+   Number of wire bits:          15505
+   Number of public wires:         189
+   Number of public wire bits:    4647
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:               4865
+     BUFG                            1
+     CARRY4                         19
+     DSP48E1                        43
+     FDRE                         2643
+     IBUF                           41
+     INV                             5
+     LUT2                         1314
+     LUT3                           77
+     LUT4                           15
+     LUT5                           75
+     LUT6                          568
+     OBUF                           33
+     RAMB36E1                       31
+

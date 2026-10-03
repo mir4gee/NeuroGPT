@@ -97,8 +97,9 @@ Following prompt tuning~\cite{lester2021prompt,li2021prefix}, we prepend a bank 
 $\ln 4$). A linear probe on fold 0 (Table~\ref{tab:probe}) shows that class information survives in the encoder output but
 not in the frozen GPT's last-token state, which is nearly identical across trials. We also found that keeping frozen
 modules in training mode (dropout $p{=}0.5$, BatchNorm updates) corrupts the features seen by the head; frozen modules
-must be kept in evaluation mode. With these fixes and a trainable skip from the encoder, prompts did not help on the
-folds completed (0.359 with vs.\ 0.357 without prompts, 4 folds).
+must be kept in evaluation mode. With these fixes and a trainable skip from the encoder, prompts did not help: over all 9
+folds, $0.372\pm0.027$ with vs.\ $0.363\pm0.028$ without prompts ($+0.009$, 6/9 subjects, Wilcoxon $p=0.12$), far below
+the fine-tuned encoder (0.600).
 
 \begin{table}[t]\centering\caption{Linear probe on frozen features (fold 0, test subject A01).}\label{tab:probe}
 \begin{tabular}{lcc}\toprule
@@ -208,7 +209,7 @@ shows that cross-subject pre-adaptation can also hurt, and that detecting this r
 On the hardware side, the model is small enough for 8-bit microcontroller or FPGA deployment without accuracy loss,
 and the exact fusion of its first two layers removes more than half of its arithmetic.
 
-\textbf{Limitations.} One dataset with 9 subjects; few seeds; the prompt-tuning study covers 4 folds; our reproduction is
+\textbf{Limitations.} One dataset with 9 subjects; few seeds; the prompt-tuning study uses one seed; our reproduction is
 $\approx$4 points below the reported mean; alignment is transductive for the test subject; we did not run a from-scratch
 control; calibration settings were not tuned, which is conservative but may underestimate achievable accuracy; FPGA clock
 frequency, latency and power, and microcontroller latency, were not measured on hardware.

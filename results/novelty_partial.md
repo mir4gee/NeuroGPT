@@ -1,4 +1,28 @@
-# Novelty (class-conditional soft prompt-tuning): status and partial results
+# Novelty (class-conditional soft prompt-tuning): results
+
+## Final: all 9 folds (local re-run, 2026-10-04, `experiments/run_prompt_tuning_local.sh`)
+Same settings as below (readout=skip, frozen backbone in eval mode, lr 3e-4, 10,000 steps, seed 1234), held-out
+accuracy at the final step:
+
+| Fold | Subject | 4 prompt tokens/class | 0 tokens (ablation) |
+|---|---|---|---|
+| 0 | A01 | 0.351 | 0.352 |
+| 1 | A02 | 0.328 | 0.328 |
+| 2 | A03 | 0.401 | 0.375 |
+| 3 | A04 | 0.380 | 0.344 |
+| 4 | A05 | 0.368 | 0.351 |
+| 5 | A06 | 0.359 | 0.358 |
+| 6 | A07 | 0.406 | 0.424 |
+| 7 | A08 | 0.401 | 0.380 |
+| 8 | A09 | 0.358 | 0.356 |
+| **Mean +/- std** | | **0.372 +/- 0.027** | **0.363 +/- 0.028** |
+
+- Prompts vs no prompts: +0.009, higher on 6/9 subjects, paired t p = 0.133, Wilcoxon p = 0.117 -> **no significant effect**.
+- Both are 0.23 below the fine-tuned baseline on the same machine (0.600), and below the paper's frozen linear probe (0.443).
+- These supersede the partial Colab numbers below, which agree (folds 0-3: 0.359 vs 0.357).
+
+---
+# Earlier status (Colab, incomplete)
 
 **Status: incomplete.** The Colab runtime became unresponsive at about 07:50 IST while the final 27 runs were
 in progress, so the 9-fold novelty comparison was not finished. Numbers below are what had been logged before

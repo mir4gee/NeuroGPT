@@ -26,12 +26,14 @@ if _SRC not in sys.path:
 from encoder.conformer_braindecode import _MultiHeadAttention  # noqa: E402
 
 
+def _ste_round(v):
+    """round() in the forward pass, identity gradient in the backward pass (straight-through estimator)."""
+    return v + (torch.round(v) - v).detach()
+
+
 def fake_quant(x, scale, bits, signed=True):
-    if signed:
-        q = 2 ** (bits - 1) - 1
-        return torch.clamp(torch.round(x / scale), -q, q) * scale
-    q = 2 ** bits - 1
-    return torch.clamp(torch.round(x / scale), 0, q) * scale
+    lo, hi = (-(2 ** (bits - 1) - 1), 2 ** (bits - 1) - 1) if signed else (0, 2 ** bits - 1)
+    return torch.clamp(_ste_round(x / scale), lo, hi) * scale
 
 
 class ActQuant(nn.Module):
@@ -76,27 +78,46 @@ def _quant_weight_(module, bits):
 class QLayer(nn.Module):
     """Wraps a Conv2d/Linear: quantize its input, run it with quantized weights."""
 
-    def __init__(self, layer, w_bits, a_bits):
+    def __init__(self, layer, w_bits, a_bits, qat=False):
         super().__init__()
         self.layer = copy.deepcopy(layer)
+        self.w_bits, self.qat = w_bits, qat
         self.w_int = self.w_scale = None
-        if w_bits is not None:
+        if w_bits is not None and not qat:
             self.w_int, self.w_scale = _quant_weight_(self.layer, w_bits)
         self.aq = ActQuant(a_bits)
 
     def forward(self, x):
-        return self.layer(self.aq(x))
+        x = self.aq(x)
+        if not (self.qat and self.w_bits is not None):
+            return self.layer(x)
+        # QAT: keep float master weights, quantize them on the fly (per output channel, STE)
+        w = self.layer.weight
+        q = 2 ** (self.w_bits - 1) - 1
+        scale = w.detach().reshape(w.shape[0], -1).abs().amax(dim=1).clamp(min=1e-12) / q
+        wq = fake_quant(w, scale.reshape((-1,) + (1,) * (w.dim() - 1)), self.w_bits)
+        if isinstance(self.layer, nn.Conv2d):
+            return F.conv2d(x, wq, self.layer.bias, self.layer.stride, self.layer.padding)
+        return F.linear(x, wq, self.layer.bias)
+
+    def freeze(self):
+        """End of QAT: bake the quantized weights in and record the integer weights for export."""
+        if self.qat and self.w_bits is not None:
+            self.w_int, self.w_scale = _quant_weight_(self.layer, self.w_bits)
+            self.qat = False
 
 
 class QAttention(nn.Module):
     """Same maths as _MultiHeadAttention (eval mode), with quantized Q, K, V and attention probabilities."""
 
-    def __init__(self, att, w_bits, a_bits):
+    def __init__(self, att, w_bits, a_bits, qat=False):
         super().__init__()
         self.emb_size, self.num_heads = att.emb_size, att.num_heads
-        self.queries, self.keys, self.values = (QLayer(att.queries, w_bits, a_bits), QLayer(att.keys, w_bits, a_bits),
-                                                QLayer(att.values, w_bits, a_bits))
-        self.projection = QLayer(att.projection, w_bits, a_bits)
+        self.att_drop = att.att_drop
+        self.queries, self.keys, self.values = (QLayer(att.queries, w_bits, a_bits, qat),
+                                                QLayer(att.keys, w_bits, a_bits, qat),
+                                                QLayer(att.values, w_bits, a_bits, qat))
+        self.projection = QLayer(att.projection, w_bits, a_bits, qat)
         self.q_aq, self.k_aq, self.v_aq = ActQuant(a_bits), ActQuant(a_bits), ActQuant(a_bits)
         self.p_aq = ActQuant(a_bits, signed=False)
 
@@ -105,7 +126,7 @@ class QAttention(nn.Module):
         k = rearrange(self.k_aq(self.keys(x)), "b n (h d) -> b h n d", h=self.num_heads)
         v = rearrange(self.v_aq(self.values(x)), "b n (h d) -> b h n d", h=self.num_heads)
         energy = torch.einsum("bhqd, bhkd -> bhqk", q, k)
-        att = self.p_aq(F.softmax(energy / self.emb_size ** 0.5, dim=-1))
+        att = self.att_drop(self.p_aq(F.softmax(energy / self.emb_size ** 0.5, dim=-1)))
         out = torch.einsum("bhal, bhlv -> bhav ", att, v)
         return self.projection(rearrange(out, "b h n d -> b n (h d)"))
 
@@ -138,7 +159,7 @@ def fuse_frontend(enc):
     return enc
 
 
-def quantize(encoder, w_bits, a_bits, fuse=False):
+def quantize(encoder, w_bits, a_bits, fuse=False, qat=False):
     """encoder: the trained EEGConformer (decoding mode). w_bits/a_bits None = keep float."""
     enc = fold_batchnorm(encoder)
     if fuse:
@@ -149,9 +170,9 @@ def quantize(encoder, w_bits, a_bits, fuse=False):
     def swap(parent):
         for name, child in parent.named_children():
             if isinstance(child, _MultiHeadAttention):
-                setattr(parent, name, QAttention(child, w_bits, a_bits))
+                setattr(parent, name, QAttention(child, w_bits, a_bits, qat))
             elif isinstance(child, (nn.Conv2d, nn.Linear)):
-                setattr(parent, name, QLayer(child, w_bits, a_bits))
+                setattr(parent, name, QLayer(child, w_bits, a_bits, qat))
             else:
                 swap(child)
     swap(enc)

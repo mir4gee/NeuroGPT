@@ -84,3 +84,18 @@ multiscale Riemannian features (43 bands, 10,879 features), HD dimension 10,000,
   trials and our model also learned from the other 8 subjects. Not an identical comparison.
 - Model size: the binarized SVM is 4 x 10,879 bits = 5.4 KB and HD class vectors are tiny, but their front end
   (43 band-pass filters, 22x22 covariances, matrix logarithms per band) is float-heavy and was not costed here.
+
+## 5. Quantization-aware training (QAT) for 4-bit - `src/hw/qat.py`, `qat_results.json`
+Fine-tune each saved model with fake quantization in the loop (straight-through estimator) on its own training data.
+Fixed in advance: fused front end, lr 1e-5, AdamW without weight decay, batch 32, dropout on, activation ranges from
+256 training trials frozen; 1,000 steps (LOSO) / 300 steps (calibrated). Seed 1, 9 subjects per row.
+
+| Setting | fp32 | W4A8 PTQ | **W4A8 QAT** | W4A4 PTQ | **W4A4 QAT** |
+|---|---|---|---|---|---|
+| Cross-subject | 0.600 | 0.579 | **0.595** | 0.558 | **0.588** |
+| Calibrated | 0.708 | 0.655 | **0.707** | 0.633 | **0.709** |
+| Calibrated + alignment | 0.756 | 0.727 | **0.745** | 0.708 | **0.734** |
+
+QAT vs PTQ, Wilcoxon over subjects: LOSO W4A8 +0.016 (p=0.098), W4A4 +0.030 (8/9, p=0.008); calibrated W4A8 +0.052
+(8/9, p=0.008), W4A4 +0.076 (9/9, p=0.004); aligned W4A8 +0.018 (p=0.148), W4A4 +0.026 (p=0.078).
+4-bit weights: ~350 KB (~2.9 Mbit), versus 140 x 36 Kbit = 5.0 Mbit of block RAM on a Zynq-7020, so the whole model can stay on chip (not implemented here).

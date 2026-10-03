@@ -54,6 +54,9 @@ showing that the frozen GPT discards class information (Sec.~\ref{sec:prompt}).
 \item A training-subject-only selection study of alignment, augmentation and ensembling (Sec.~\ref{sec:levers}).
 \item A session-to-session calibration study showing a large gain from cross-subject pre-adaptation, and a
 documented case of cross-session negative transfer (Sec.~\ref{sec:calib}).
+\item An 8-bit deployment path with no accuracy loss, an exact fusion of the two front-end convolutions that halves
+the arithmetic, a bit-exact C engine and a bit-exact FPGA accelerator, compared with a dedicated binary decoder
+(Sec.~\ref{sec:hw}).
 \end{itemize}
 
 \section{Background: Neuro-GPT}
@@ -157,6 +160,44 @@ Alignment in both stages (exploratory) & $0.754\pm0.101$ \\
 \caption{Session-E accuracy per subject for the calibration settings (the last bar is exploratory).}\label{fig:calib}
 \end{figure}
 
+\subsection{Hardware deployment}\label{sec:hw}
+The deployed encoder-only model has 717,973 parameters (561k in the classifier head). \textbf{Quantization.} We fold
+BatchNorm into the spatial convolution, quantize weights per output channel and the inputs of every convolution, linear
+layer and attention product per tensor (ranges from 256 training trials), keeping LayerNorm, softmax, GELU, ELU and
+residual additions in higher precision. \textbf{Fusion.} The temporal ($1\times25$) and spatial ($22\times1$) convolutions
+have no nonlinearity between them and are merged offline into one $22\times25$ convolution,
+$W[o,c,k]=\sum_f W_2[o,f,c]\,W_1[f,k]$, which is exact in floating point and reduces multiply-accumulates per trial from
+62.0\,M to 28.5\,M. Table~\ref{tab:quant} shows that 8-bit inference (W8A8) leaves accuracy unchanged in all three
+settings, while 4-bit post-training quantization loses 5--8 points. Quantization-aware training (fake quantization with a straight-through estimator; lr $10^{-5}$,
+1,000 steps for LOSO and 300 for calibrated models, own training data only, fixed in advance) recovers most of the loss:
+for calibrated models 4-bit weights return to float accuracy (0.707 vs 0.708; better than post-training on 8/9 users,
+$p=0.008$), halving weight memory to about 350\,KB.
+
+\begin{table}[t]\centering\caption{Mean accuracy under quantization (9 subjects $\times$ 3 seeds).}\label{tab:quant}
+\begin{tabular}{lccc}\toprule
+Precision & LOSO & Calib. & Calib.+EA \\ \midrule
+fp32 & 0.599 & 0.711 & 0.754 \\
+W8A8, fused & 0.599 & 0.711 & 0.753 \\
+W4A8, PTQ & 0.550 & 0.636 & 0.696 \\
+W4A8, QAT$^\dagger$ & 0.595 & 0.707 & 0.745 \\
+W4A4, QAT$^\dagger$ & 0.588 & 0.709 & 0.734 \\
+\multicolumn{4}{l}{\footnotesize $^\dagger$seed 1 only; fp32 for seed 1: 0.600 / 0.708 / 0.756} \\
+\bottomrule
+\end{tabular}\end{table}
+
+\textbf{C engine.} A portable C implementation (int8$\times$int8$\rightarrow$int32 for all convolutions, linear layers and
+attention products) computes the front end one time step at a time and reproduces the PyTorch W8A8 predictions on 100\%
+of test trials (864 trials, two models). The fused model needs 700\,KB of weights and about 48\,KB of RAM, within reach
+of a Cortex-M4-class microcontroller, and runs in 13\,ms per trial on one laptop core; we did not measure on a
+microcontroller. \textbf{FPGA accelerator.} A Verilog accelerator for the fused front end (73.5\% of the arithmetic) uses
+40 parallel int8 multiply-accumulate lanes and is bit-exact in simulation against the integer reference (19,040 outputs,
+261,845 cycles per 2-s chunk). Yosys synthesis for Xilinx 7-series reports 2,049 LUTs, 2,643 flip-flops, 43 DSP48 and
+31 RAMB36 (4\% of the logic of a Zynq-7020); clock frequency and power require place-and-route and were not measured.
+\textbf{Binary baseline.} The binarized classifiers of Hersche et al.~\cite{hersche2020binary}, run with their code on the
+same session split, reach 0.610 (binarized SVM) and 0.707 (binary hyperdimensional); our calibrated W8A8 model reaches
+0.711 ($p=0.50$), and 0.753 with alignment (exploratory, $p=0.098$). Their test sets exclude artifact trials, so the
+comparison is approximate.
+
 \section{Discussion}
 Cross-subject accuracy of Neuro-GPT appears bounded by inter-subject variability rather than by tuning: the gap between
 training and held-out subjects is large, and alignment, augmentation, ensembling and prompt-tuning all fail to close it.
@@ -164,15 +205,19 @@ The probe offers a mechanistic reason why the GPT is discarded downstream in the
 the frozen GPT cannot help. When a single calibration session is available, the same model becomes much more useful, and
 starting from a cross-subject model is better than starting from the pre-trained model for 8 of 9 users. The A05 case
 shows that cross-subject pre-adaptation can also hurt, and that detecting this requires data from a later session.
+On the hardware side, the model is small enough for 8-bit microcontroller or FPGA deployment without accuracy loss,
+and the exact fusion of its first two layers removes more than half of its arithmetic.
 
 \textbf{Limitations.} One dataset with 9 subjects; few seeds; the prompt-tuning study covers 4 folds; our reproduction is
 $\approx$4 points below the reported mean; alignment is transductive for the test subject; we did not run a from-scratch
-control; calibration settings were not tuned, which is conservative but may underestimate achievable accuracy.
+control; calibration settings were not tuned, which is conservative but may underestimate achievable accuracy; FPGA clock
+frequency, latency and power, and microcontroller latency, were not measured on hardware.
 
 \section{Conclusion}
 A controlled re-evaluation of Neuro-GPT shows that its LOSO performance is hard to improve with prompt-tuning, alignment,
 augmentation or ensembling, explains why with a probe of the frozen model, and shows that calibration on one session of
-the target user raises next-session accuracy from 0.588 to 0.711 (0.754 in an exploratory variant with per-session alignment). We release code and per-subject results to support
+the target user raises next-session accuracy from 0.588 to 0.711 (0.754 in an exploratory variant with per-session alignment). The model runs at 8 bits without accuracy loss, and a
+fused, bit-exact FPGA front end fits in 4\% of a Zynq-7020's logic. We release code and per-subject results to support
 further evaluation of EEG foundation models.
 
 \section*{Code and Data Availability}
